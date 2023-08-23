@@ -1,0 +1,116 @@
+---- 1
+
+with first_payments as
+(
+select user_id
+    , date_trunc('day',min(transaction_datetime)) as first_payment_date
+from skyeng_db.payments
+where status_name='success'
+group by user_id
+order by user_id
+)
+
+---- 2
+
+, all_dates as
+(
+select distinct date_trunc('day', class_start_datetime) as dt
+from skyeng_db.classes
+where date_trunc('year', class_start_datetime)='01-01-2016'
+order by date_trunc('day', class_start_datetime)
+)
+
+---- 3
+
+, all_dates_by_user as
+(
+select user_id, dt 
+from first_payments a
+    left join all_dates b
+        on a.first_payment_date<=b.dt
+)
+
+---- 4 
+
+, payments_by_dates as 
+(
+select a.user_id, dt as payment_date, sum(classes) as transaction_balance_change
+from all_dates_by_user a
+    join skyeng_db.payments b 
+        on a.user_id=b.user_id and dt=date_trunc('day', transaction_datetime)
+where status_name='success'
+group by a.user_id, dt
+)
+
+---- 5
+
+, payments_by_dates_cumsum as
+(
+select a.user_id
+    , dt
+    , coalesce(transaction_balance_change,0) as transaction_balance_change
+    , sum(transaction_balance_change) over(partition by a.user_id order by dt) as transaction_balance_change_cs
+from all_dates_by_user a 
+    left join payments_by_dates b 
+        on a.user_id=b.user_id and dt=payment_date
+)
+
+---- 6 
+
+, classes_by_dates as
+(
+select user_id
+, date_trunc('day', class_start_datetime) as class_date
+, count(*)*-1 as classes
+from skyeng_db.classes
+where class_type!='trial' and (class_status='success' or class_status='failed_by_student')
+group by user_id, class_start_datetime
+)
+
+---- 7
+
+, classes_by_dates_dates_cumsum as
+(
+select a.user_id
+, dt
+, coalesce(classes,0) as classes
+, coalesce(sum(classes) over(partition by a.user_id order by dt),0) as classes_cs
+from all_dates_by_user a 
+    left join classes_by_dates b
+        on a.dt=b.class_date and a.user_id=b.user_id
+)
+
+---- 8
+
+, balances as 
+(
+select a.user_id
+, dt
+, transaction_balance_change
+, transaction_balance_change_cs
+, classes
+, classes_cs
+, classes_cs+transaction_balance_change_cs as balance
+from payments_by_dates_cumsum a
+    left join classes_by_dates_dates_cumsum b
+        using( user_id, dt)
+)
+
+---- топ-1000 строк из CTE balances с сортировкой по user_id и dt
+
+select *
+from balances
+order by user_id, dt
+limit 1000
+
+---- Шаг 9
+
+-- select dt
+--     ,sum(transaction_balance_change) as balance_change_sum
+--     , sum(transaction_balance_change_cs) as balance_change_cssum
+--     ,sum(classes) as classes_sum
+--     , sum(classes_cs) as classes_cssum
+--     , sum(balance) as balance_sum 
+-- from balances
+-- group by dt
+-- order by dt
